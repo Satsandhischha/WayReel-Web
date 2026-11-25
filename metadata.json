@@ -1,0 +1,6 @@
+{
+  "name": "WayReel",
+  "description": "Turn saved Instagram Reels and posts into a map of places and a saved travel list.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

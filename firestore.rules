@@ -1,0 +1,219 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Global Hardened Primitives
+    // -------------------------------------------------------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedEmail() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedEmail() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidBoundedString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isValidStringList(arr, maxLen) {
+      return arr is list
+        && arr.size() <= maxLen
+        && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= 500));
+    }
+
+    function isValidCoordinates(coords) {
+      return coords == null
+        || (
+          coords is map
+          && coords.keys().hasAll(['lat', 'lng'])
+          && coords.keys().hasOnly(['lat', 'lng'])
+          && (coords.lat is number)
+          && (coords.lng is number)
+          && coords.lat >= -90
+          && coords.lat <= 90
+          && coords.lng >= -180
+          && coords.lng <= 180
+        );
+    }
+
+    function isValidExtractionSource(src) {
+      return src in ['caption', 'hashtags', 'audio', 'on-screen text', 'manual'];
+    }
+
+    // -------------------------------------------------------------------------
+    // Entity Validation Blueprints
+    // -------------------------------------------------------------------------
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['userId', 'email', 'displayName', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'email', 'displayName', 'createdAt', 'updatedAt'])
+        && isValidId(data.userId)
+        && data.userId == userId
+        && isValidBoundedString(data.email, 0, 254)
+        && isValidBoundedString(data.displayName, 0, 120)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTrip(data, userId) {
+      return data.keys().hasAll(['userId', 'name', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'name', 'createdAt', 'updatedAt'])
+        && isValidId(data.userId)
+        && data.userId == userId
+        && isValidBoundedString(data.name, 1, 100)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPlace(data, userId) {
+      return data.keys().hasAll([
+          'userId', 'name', 'city', 'country', 'coordinates',
+          'coordinatesApproximate', 'category', 'note', 'tags',
+          'visited', 'tripId', 'tripName', 'sourceLink', 'sourceLinks',
+          'extractionSource', 'confidence', 'dateAdded', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'userId', 'name', 'city', 'country', 'coordinates',
+          'coordinatesApproximate', 'category', 'note', 'tags',
+          'visited', 'tripId', 'tripName', 'sourceLink', 'sourceLinks',
+          'extractionSource', 'confidence', 'dateAdded', 'updatedAt'
+        ])
+        && isValidId(data.userId)
+        && data.userId == userId
+        && isValidBoundedString(data.name, 1, 120)
+        && isValidBoundedString(data.city, 0, 100)
+        && isValidBoundedString(data.country, 0, 100)
+        && isValidCoordinates(data.coordinates)
+        && data.coordinatesApproximate is bool
+        && isValidBoundedString(data.category, 0, 60)
+        && isValidBoundedString(data.note, 0, 400)
+        && isValidStringList(data.tags, 15)
+        && data.visited is bool
+        && isValidBoundedString(data.tripId, 0, 128)
+        && (data.tripId == '' || isValidId(data.tripId))
+        && isValidBoundedString(data.tripName, 0, 100)
+        && isValidBoundedString(data.sourceLink, 0, 500)
+        && isValidStringList(data.sourceLinks, 20)
+        && isValidExtractionSource(data.extractionSource)
+        && data.confidence is number
+        && data.confidence >= 0
+        && data.confidence <= 1
+        && data.dateAdded is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // -------------------------------------------------------------------------
+    // /users/{userId}
+    // -------------------------------------------------------------------------
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'updatedAt']);
+
+      allow delete: if isValidId(userId) && isOwner(userId);
+
+      // -----------------------------------------------------------------------
+      // /users/{userId}/trips/{tripId}
+      // -----------------------------------------------------------------------
+      match /trips/{tripId} {
+        allow get: if isValidId(userId) && isValidId(tripId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && existing().userId == request.auth.uid;
+
+        allow create: if isValidId(userId)
+          && isValidId(tripId)
+          && isOwner(userId)
+          && isValidTrip(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+
+        allow update: if isValidId(userId)
+          && isValidId(tripId)
+          && isOwner(userId)
+          && isValidTrip(incoming(), userId)
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'updatedAt']);
+
+        allow delete: if isValidId(userId) && isValidId(tripId) && isOwner(userId);
+      }
+
+      // -----------------------------------------------------------------------
+      // /users/{userId}/places/{placeId}
+      // -----------------------------------------------------------------------
+      match /places/{placeId} {
+        allow get: if isValidId(userId) && isValidId(placeId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && existing().userId == request.auth.uid;
+
+        allow create: if isValidId(userId)
+          && isValidId(placeId)
+          && isOwner(userId)
+          && isValidPlace(incoming(), userId)
+          && incoming().dateAdded == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && (incoming().tripId == '' || exists(/databases/$(database)/documents/users/$(userId)/trips/$(incoming().tripId)));
+
+        allow update: if isValidId(userId)
+          && isValidId(placeId)
+          && isOwner(userId)
+          && isValidPlace(incoming(), userId)
+          && incoming().userId == existing().userId
+          && incoming().dateAdded == existing().dateAdded
+          && incoming().updatedAt == request.time
+          && (incoming().tripId == '' || exists(/databases/$(database)/documents/users/$(userId)/trips/$(incoming().tripId)))
+          && (
+            // Action: Toggle visited status
+            incoming().diff(existing()).affectedKeys().hasOnly(['visited', 'updatedAt'])
+            // Action: Assign or clear trip
+            || incoming().diff(existing()).affectedKeys().hasOnly(['tripId', 'tripName', 'updatedAt'])
+            // Action: Edit details or merge duplicate source
+            || incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'city', 'country', 'coordinates', 'coordinatesApproximate',
+              'category', 'note', 'tags', 'sourceLink', 'sourceLinks',
+              'tripId', 'tripName', 'visited', 'updatedAt'
+            ])
+          );
+
+        allow delete: if isValidId(userId) && isValidId(placeId) && isOwner(userId);
+      }
+    }
+  }
+}
